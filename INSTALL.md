@@ -668,12 +668,23 @@ that happens.
 ## Step 9c — Boot animation
 
 At every boot (e-ink only -- a no-op on HDMI/terminal), Inkwriter reveals
-`inkwriter/art/logo.png` with a diagonal cascade of real partial
-refreshes -- a wave sweeping from the top-left corner to the bottom-right,
-built entirely from the panel's own native partial-refresh operation
-rather than any special animation hardware. Takes roughly 2-3 seconds,
-then holds briefly and does one clean full refresh before the file
-browser appears.
+`inkwriter/art/logo.png` and then clears it away, all built from the
+panel's own native partial-refresh operation rather than any special
+animation hardware:
+
+1. **Iris reveal** -- the logo appears from its own center outward, like
+   an aperture opening, instead of a flat sweep in one direction.
+2. **Hold** on the completed logo for a moment, with one clean full
+   refresh to leave a crisp image.
+3. **Wipe-clear** -- the whole panel sweeps to blank in vertical strips,
+   so the handoff into the file browser is a deliberate wipe rather than
+   an abrupt cut.
+
+Takes roughly 4-5 seconds total. Want to see it before it's on the
+actual hardware? `tools/preview_boot_animation.py` renders the exact
+same reveal/hold/wipe sequence to an animated GIF you can open on any
+computer -- run `python3 tools/preview_boot_animation.py` from the repo
+root (needs Pillow: `pip install pillow`).
 
 To use your own logo: replace `inkwriter/art/logo.png` with any
 PNG/JPG -- it's letterboxed to fit the panel and dithered to 1-bit

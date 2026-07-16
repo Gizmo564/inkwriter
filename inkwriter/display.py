@@ -37,6 +37,7 @@ while Python is still starting up (optional, silently skipped on failure).
 import logging
 import os
 import struct
+import time
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -405,16 +406,26 @@ class Display:
 
         self._render_full_screen(draw)
 
-    def show_boot_animation(self, logo_path=None, cols=6, rows=3, delay=0.08):
+    def show_boot_animation(self, logo_path=None, cols=14, rows=5, delay=0.045,
+                             hold=0.6):
         """
-        One-time boot flourish: reveals the logo via a diagonal cascade of
-        real partial refreshes -- the panel's own native operation, just
-        sequenced into a wipe instead of one single paste, so it doubles
-        as a small showcase of what partial refresh actually looks like
-        on this hardware. Skips itself silently (not an error) if
-        boot_animation is off in config or the logo file is missing --
-        this is a nice-to-have, never something that should block or
-        break startup.
+        One-time boot flourish, all built from the panel's own native
+        partial-refresh operation -- no special hardware needed, just a
+        sequence of small updates:
+
+          1. Iris reveal: the logo appears from the center outward, like
+             an aperture opening -- a nod to the logo itself being
+             concentric rings. Blocks are revealed in order of distance
+             from the image center rather than a flat left-right/
+             diagonal sweep.
+          2. Hold, then a full refresh to leave a crisp final image.
+          3. Wipe-clear: the whole panel sweeps to blank in vertical
+             strips, turning the handoff to the file browser into a
+             deliberate transition instead of an abrupt cut.
+
+        Skips itself silently (not an error) if boot_animation is off in
+        config or the logo file is missing -- this is a nice-to-have,
+        never something that should block or break startup.
 
         Runs once, at process start, entirely via direct PIL/SPI calls --
         no curses involvement, same as the shutdown/milestone screens.
@@ -430,8 +441,6 @@ class Display:
         art = self._load_art_fit(logo_path, self.config.display_width, self.config.display_height)
         if art is None:
             return
-
-        import time as _time
 
         w, h = self.config.display_width, self.config.display_height
         art_w, art_h = art.size
@@ -451,31 +460,53 @@ class Display:
                 bx, by = c * block_w, r * block_h
                 bw = block_w if c < cols - 1 else art_w - bx
                 bh = block_h if r < rows - 1 else art_h - by
-                blocks.append((c, r, bx, by, bw, bh))
+                blocks.append((bx, by, bw, bh))
 
-        # Diagonal cascade -- reveal order follows (row + col), so it
-        # sweeps like a wave across the logo (top-left corner first,
-        # bottom-right corner last) rather than a plain left-right or
-        # top-down wipe. The secondary sort key just keeps each diagonal's
-        # own block order stable and predictable.
-        blocks.sort(key=lambda b: (b[1] + b[0], b[0]))
+        # Iris/aperture reveal -- order blocks by distance from the
+        # image's center so the wipe expands outward like a ring opening,
+        # rather than sweeping flatly across in one direction.
+        cx, cy = art_w / 2.0, art_h / 2.0
 
-        for c, r, bx, by, bw, bh in blocks:
+        def _dist(block):
+            bx, by, bw, bh = block
+            return ((bx + bw / 2.0 - cx) ** 2 + (by + bh / 2.0 - cy) ** 2) ** 0.5
+
+        blocks.sort(key=_dist)
+
+        for bx, by, bw, bh in blocks:
             region = art.crop((bx, by, bx + bw, by + bh))
             self._image.paste(region, (x0 + bx, y0 + by))
             self._partial_refresh((x0 + bx, y0 + by, bw, bh))
-            _time.sleep(delay)
+            time.sleep(delay)
 
         # One clean full refresh at the end: resets the accumulated
         # partial-refresh ghosting from all those small updates and
-        # leaves a crisp final image, rather than handing off to the
-        # first real screen with dozens of partial artifacts still
-        # sitting on the panel. Also resets the refresh-interval counter
-        # so the browser's very first draw doesn't immediately trigger
-        # another full refresh on top of this one.
+        # leaves a crisp final image before the hold and wipe-clear.
         self._full_refresh()
         self._partial_count = 0
-        _time.sleep(0.8)   # brief hold so the completed logo is actually seen
+        time.sleep(hold)   # brief pause so the completed logo is actually seen
+
+        self._wipe_clear()
+
+    def _wipe_clear(self, strips=12, delay=0.03):
+        """
+        Sweep the entire panel to blank in vertical strips, left to
+        right, via real partial refreshes -- the transition out of the
+        boot animation and into the file browser, so the logo visibly
+        wipes away instead of just cutting to the next screen. Ends with
+        a full refresh so the browser's very first draw starts from a
+        clean, ghost-free panel.
+        """
+        w, h = self.config.display_width, self.config.display_height
+        strip_w = max(1, w // strips)
+        for i in range(strips):
+            x = i * strip_w
+            sw = strip_w if i < strips - 1 else w - x
+            self._draw_ctx.rectangle([x, 0, x + sw, h], fill=255)
+            self._partial_refresh((x, 0, sw, h))
+            time.sleep(delay)
+        self._full_refresh()
+        self._partial_count = 0
 
     def show_bt_waiting_screen(self, mac, attempt):
         """

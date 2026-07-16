@@ -1,0 +1,15 @@
+# Python bytecode -- regenerated automatically, never worth tracking or
+# shipping to the Pi.
+__pycache__/
+*.pyc
+
+# Your own shutdown-screen backgrounds (see inkwriter/art/custom/README.txt).
+# Personal images, and the sci-fi wallpaper pack this project used as an
+# example is CC BY-NC-ND -- kept local, never pushed to a public repo.
+inkwriter/art/custom/*
+!inkwriter/art/custom/README.txt
+
+# OS / editor cruft
+.DS_Store
+*.swp
+*.bak

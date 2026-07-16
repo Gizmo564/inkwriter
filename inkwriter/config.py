@@ -50,6 +50,11 @@ class Config:
                 #          back to growth mode if that folder is empty.
                 # off    = no shutdown image, just sleep
                 "shutdown_screen": "growth",
+                # One-time flourish at boot (e-ink only): reveals
+                # inkwriter/art/logo.png via a cascading wipe of real
+                # partial refreshes before the file browser appears. Skips
+                # itself silently if false, or if logo.png is missing.
+                "boot_animation": "true",
             },
             "editor": {
                 "tab_size": "4",
@@ -90,7 +95,23 @@ class Config:
                 "device": "/dev/hidg0",
                 "chars_per_second": "60",   # typing speed when sending to computer
                 "delay_between_words": "0.01",
-            }
+            },
+            "bluetooth": {
+                # MAC address of the paired keyboard, written by install.sh
+                # after pairing. Blank = no keyboard-wait gate at boot (the
+                # e-ink UI starts immediately regardless of Bluetooth
+                # state) -- set automatically if you used install.sh, or
+                # by hand if you paired manually.
+                "keyboard_mac": "",
+                # If keyboard_mac is set and this is true, Inkwriter shows
+                # a "waiting for keyboard" screen at boot (e-ink only) and
+                # blocks entering the UI until that keyboard is actually
+                # connected -- landing in an editor you have no way to
+                # type into is worse than a clear wait screen. Re-read
+                # live during the wait, so flipping this to false over
+                # SSH lets a boot proceed without the keyboard.
+                "require_keyboard_at_boot": "true",
+            },
         }
 
         self._cfg = configparser.ConfigParser()
@@ -211,6 +232,19 @@ class Config:
     @property
     def hid_chars_per_second(self):
         return self._cfg.getint("usb_hid", "chars_per_second")
+
+    @property
+    def boot_animation(self):
+        return self._cfg.getboolean("display", "boot_animation", fallback=True)
+
+    @property
+    def keyboard_mac(self):
+        """Paired Bluetooth keyboard's MAC address, or '' if none set."""
+        return self._cfg.get("bluetooth", "keyboard_mac", fallback="").strip()
+
+    @property
+    def require_keyboard_at_boot(self):
+        return self._cfg.getboolean("bluetooth", "require_keyboard_at_boot", fallback=True)
 
     def key(self, name):
         """Return integer keycode for a named binding."""

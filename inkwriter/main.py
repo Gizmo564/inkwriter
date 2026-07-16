@@ -56,6 +56,12 @@ def main():
     display = Display(config)   # auto-detects eink vs terminal
     progress = Progress(config)  # shared across every Editor opened this run
 
+    if config.boot_animation:
+        try:
+            display.show_boot_animation()
+        except Exception:
+            log.exception("Boot animation failed; continuing without it")
+
     # Mutable holder so the nested `run` closure (called via curses.wrapper,
     # which we don't control the return value of) can report back whether
     # the user actually requested a system shutdown.
@@ -99,6 +105,8 @@ def main():
         app.run()
         result_state["shutdown_requested"] = app.shutdown_requested
 
+    _wait_for_keyboard(display, config)
+
     try:
         curses.wrapper(run)
     except KeyboardInterrupt:
@@ -119,6 +127,81 @@ def main():
 
         if result_state["shutdown_requested"]:
             _trigger_system_shutdown()
+
+
+def _wait_for_keyboard(display, config):
+    """
+    If a Bluetooth keyboard is configured (config.keyboard_mac, written by
+    install.sh after pairing) and require_keyboard_at_boot is on, block
+    here -- before curses even starts -- until that keyboard shows as
+    actually connected. Landing silently in the editor with no way to
+    type or navigate is worse than a clear "waiting" screen; bt-reconnect
+    .service already retries the OS-level connection several times at
+    boot (see INSTALL.md), but that's a bounded, one-shot attempt -- this
+    is the app's own unbounded fallback for whenever that didn't land in
+    time (keyboard was left off, walked out of range, needed a keypress
+    to wake up, etc).
+
+    No-op outside e-ink mode (HDMI/terminal dev sessions always have a
+    real local keyboard already) and if no keyboard_mac is configured at
+    all (nothing to gate on).
+
+    Two ways out without the keyboard ever connecting, both usable over
+    SSH: physically/remotely trigger the connection yourself
+    (`bluetoothctl connect <mac>` -- the next poll picks it up), or edit
+    ~/.config/inkwriter/config.ini and flip require_keyboard_at_boot to
+    false (re-read fresh every cycle, so this takes effect within one
+    poll interval, no restart needed).
+    """
+    if not display.is_eink:
+        return
+    mac = config.keyboard_mac
+    if not mac:
+        return
+    if not config.require_keyboard_at_boot:
+        return
+
+    if _bt_is_connected(mac):
+        return   # already connected -- no wait screen needed at all
+
+    log.info(f"Waiting for keyboard {mac} to connect before starting...")
+    display.wake()
+    attempt = 0
+    while True:
+        attempt += 1
+        display.show_bt_waiting_screen(mac, attempt)
+        time.sleep(5)
+
+        if _bt_is_connected(mac):
+            log.info(f"Keyboard {mac} connected after {attempt} attempt(s)")
+            return
+
+        # Re-read config from disk each cycle -- an SSH user flipping
+        # require_keyboard_at_boot off mid-wait should be noticed without
+        # needing a restart.
+        try:
+            config._cfg.read(config.config_file)
+        except Exception:
+            pass
+        if not config.require_keyboard_at_boot:
+            log.info("require_keyboard_at_boot turned off mid-wait -- continuing without keyboard")
+            return
+
+
+def _bt_is_connected(mac):
+    """True if bluetoothctl reports this MAC as currently connected.
+    Any failure (bluetoothd not running, command missing, timeout) is
+    treated as 'not connected' rather than raising -- this is a status
+    poll in a loop, not something that should ever crash the app."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["bluetoothctl", "info", mac],
+            capture_output=True, text=True, timeout=5,
+        )
+        return "Connected: yes" in result.stdout
+    except Exception:
+        return False
 
 
 def _trigger_system_shutdown():

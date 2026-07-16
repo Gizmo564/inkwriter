@@ -405,6 +405,102 @@ class Display:
 
         self._render_full_screen(draw)
 
+    def show_boot_animation(self, logo_path=None, cols=6, rows=3, delay=0.08):
+        """
+        One-time boot flourish: reveals the logo via a diagonal cascade of
+        real partial refreshes -- the panel's own native operation, just
+        sequenced into a wipe instead of one single paste, so it doubles
+        as a small showcase of what partial refresh actually looks like
+        on this hardware. Skips itself silently (not an error) if
+        boot_animation is off in config or the logo file is missing --
+        this is a nice-to-have, never something that should block or
+        break startup.
+
+        Runs once, at process start, entirely via direct PIL/SPI calls --
+        no curses involvement, same as the shutdown/milestone screens.
+        """
+        if self.mode != "eink":
+            return
+
+        if logo_path is None:
+            logo_path = Path(__file__).resolve().parent / "art" / "logo.png"
+        if not Path(logo_path).exists():
+            return
+
+        art = self._load_art_fit(logo_path, self.config.display_width, self.config.display_height)
+        if art is None:
+            return
+
+        import time as _time
+
+        w, h = self.config.display_width, self.config.display_height
+        art_w, art_h = art.size
+        x0 = max(0, (w - art_w) // 2)
+        y0 = max(0, (h - art_h) // 2)
+
+        # Start from a known-blank buffer -- the panel was already
+        # cleared during _init_eink(), but this guarantees it regardless
+        # of call order, so only the logo's own pixels ever need to flip.
+        self._draw_ctx.rectangle([0, 0, w, h], fill=255)
+
+        block_w = max(1, art_w // cols)
+        block_h = max(1, art_h // rows)
+        blocks = []
+        for r in range(rows):
+            for c in range(cols):
+                bx, by = c * block_w, r * block_h
+                bw = block_w if c < cols - 1 else art_w - bx
+                bh = block_h if r < rows - 1 else art_h - by
+                blocks.append((c, r, bx, by, bw, bh))
+
+        # Diagonal cascade -- reveal order follows (row + col), so it
+        # sweeps like a wave across the logo (top-left corner first,
+        # bottom-right corner last) rather than a plain left-right or
+        # top-down wipe. The secondary sort key just keeps each diagonal's
+        # own block order stable and predictable.
+        blocks.sort(key=lambda b: (b[1] + b[0], b[0]))
+
+        for c, r, bx, by, bw, bh in blocks:
+            region = art.crop((bx, by, bx + bw, by + bh))
+            self._image.paste(region, (x0 + bx, y0 + by))
+            self._partial_refresh((x0 + bx, y0 + by, bw, bh))
+            _time.sleep(delay)
+
+        # One clean full refresh at the end: resets the accumulated
+        # partial-refresh ghosting from all those small updates and
+        # leaves a crisp final image, rather than handing off to the
+        # first real screen with dozens of partial artifacts still
+        # sitting on the panel. Also resets the refresh-interval counter
+        # so the browser's very first draw doesn't immediately trigger
+        # another full refresh on top of this one.
+        self._full_refresh()
+        self._partial_count = 0
+        _time.sleep(0.8)   # brief hold so the completed logo is actually seen
+
+    def show_bt_waiting_screen(self, mac, attempt):
+        """
+        Shown at boot when a Bluetooth keyboard is configured
+        (config.keyboard_mac) but not yet connected -- landing silently in
+        the editor with no way to type or navigate would be worse than a
+        clear status screen. Redrawn every few seconds while main.py's
+        wait loop keeps polling (see _wait_for_keyboard), so this is a
+        full refresh each call like the other full-screen states rather
+        than a partial update -- simple and correct for what's meant to be
+        a rare, short-lived state, not a per-keystroke hot path.
+        """
+        if self.mode != "eink":
+            return
+
+        def draw(ctx, w, h):
+            self._draw_centered_text(
+                ctx, w, h,
+                "Waiting for keyboard...",
+                f"Bluetooth {mac}  (attempt {attempt})",
+                "SSH in to reconnect it, or edit config.ini",
+            )
+
+        self._render_full_screen(draw)
+
     def show_shutdown_screen(self, art_path, caption="", layout="centered"):
         """
         Draw a static image right before sleep(). E-ink holds its last
@@ -465,8 +561,8 @@ class Display:
         self._full_refresh()
         self._partial_count = 0
 
-    def _draw_centered_text(self, ctx, w, h, headline, subtext=""):
-        lines = [headline] + ([subtext] if subtext else [])
+    def _draw_centered_text(self, ctx, w, h, *lines):
+        lines = [ln for ln in lines if ln]
         line_h = 16
         total_h = len(lines) * line_h
         y = max(0, (h - total_h) // 2)

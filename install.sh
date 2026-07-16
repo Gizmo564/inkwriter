@@ -227,11 +227,37 @@ set -uo pipefail
 
 INKWRITER_DIR="$INKWRITER_DIR"
 BRANCH="$REPO_BRANCH"
-LOG_FILE="\$HOME/.config/inkwriter/update.log"
+DATA_DIR="\$HOME/.config/inkwriter"
+LOG_FILE="\$DATA_DIR/update.log"
+BACKUP_DIR="\$DATA_DIR/update_backups"
 NETWORK_TIMEOUT=6
 
-mkdir -p "\$(dirname "\$LOG_FILE")"
+mkdir -p "\$DATA_DIR"
 log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG_FILE"; }
+
+# Everything this update mechanism actually needs to protect --
+# config.ini, progress.json (word counts/streaks), and every document in
+# ~/Documents/inkwriter -- already lives outside \$INKWRITER_DIR entirely,
+# so `git reset --hard`/`git clean` below structurally can't touch any of
+# it (git only ever operates inside the repo's own working tree). Custom
+# shutdown backgrounds under inkwriter/art/custom/ are inside the repo
+# but gitignored, and git never removes untracked files on a plain reset,
+# plus `clean` below explicitly excludes that path.
+#
+# This backup of config.ini + progress.json is pure defense-in-depth on
+# top of that -- protects against a future mistake (this script or the
+# repo's .gitignore ever changing to no longer guarantee the above), not
+# something the current design actually depends on. Keeps the last 5.
+backup_local_data() {
+    mkdir -p "\$BACKUP_DIR"
+    local ts stamp
+    ts="\$(date '+%Y%m%d_%H%M%S')"
+    stamp="\$BACKUP_DIR/\$ts"
+    mkdir -p "\$stamp"
+    [[ -f "\$DATA_DIR/config.ini" ]] && cp "\$DATA_DIR/config.ini" "\$stamp/"
+    [[ -f "\$DATA_DIR/progress.json" ]] && cp "\$DATA_DIR/progress.json" "\$stamp/"
+    ls -1d "\$BACKUP_DIR"/*/ 2>/dev/null | sort | head -n -5 | xargs -r rm -rf
+}
 
 cd "\$INKWRITER_DIR" || { log "ERROR: \$INKWRITER_DIR not found"; exit 0; }
 
@@ -256,6 +282,7 @@ fi
 
 log "UPDATE FOUND: \$LOCAL_HEAD -> \$REMOTE_HEAD"
 PREV_HEAD="\$LOCAL_HEAD"
+backup_local_data
 
 if ! timeout "\$NETWORK_TIMEOUT" git fetch origin "\$BRANCH" >> "\$LOG_FILE" 2>&1; then
     log "ERROR: git fetch failed -- keeping current version"
@@ -279,7 +306,7 @@ EOF
             sudo chmod +x /usr/local/bin/inkwriter-update
             ok "Wrote /usr/local/bin/inkwriter-update"
 
-            sudo tee /etc/systemd/system/inkwriter-update.service > /dev/null << 'EOF'
+            sudo tee /etc/systemd/system/inkwriter-update.service > /dev/null << EOF
 [Unit]
 Description=Check for and apply Inkwriter updates from GitHub
 Before=inkwriter.service
@@ -290,6 +317,13 @@ After=network.target
 [Service]
 Type=oneshot
 TimeoutStartSec=30
+# Must run as the project's owner, not root -- the script writes to that
+# user's ~/.config/inkwriter/update.log (systemd only auto-exports \$HOME
+# for a unit when User= is set; without it \$HOME is unbound under
+# 'set -u' and the whole thing fails immediately), and running git as
+# root against a directory owned by another user leaves root-owned files
+# behind that later break normal (non-sudo) git/file operations there.
+User=$INKWRITER_USER
 ExecStart=/usr/local/bin/inkwriter-update
 
 [Install]
@@ -346,9 +380,27 @@ if ask_yn "Set up a Bluetooth keyboard now?" Y; then
     if [[ -n "$BT_MAC" ]]; then
         sudo tee /etc/bluetooth/reconnect.sh > /dev/null << EOF
 #!/bin/bash
-# Reconnect trusted Bluetooth devices on boot (written by install.sh)
+# Reconnect trusted Bluetooth devices on boot (written by install.sh).
+#
+# Retries a few times, spaced out -- the adapter and/or keyboard often
+# aren't fully ready in the first several seconds after boot, so a single
+# attempt fails more often than it should. Many BT keyboards also won't
+# accept an unsolicited connect while asleep; a keypress wakes them, and
+# with AutoEnable=true (set in /etc/bluetooth/main.conf) they'll usually
+# reconnect on their own at that point without this script's help --
+# this is a second line of defense, not the only path to reconnecting.
+#
+# Always exits 0: a failed reconnect attempt here is a routine, expected
+# condition (keyboard asleep/out of range), not a real service failure,
+# so this doesn't report as "failed" on every boot for something normal.
 sleep 10
-bluetoothctl -- connect $BT_MAC
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if bluetoothctl -- connect $BT_MAC; then
+        exit 0
+    fi
+    sleep 5
+done
+exit 0
 EOF
         sudo chmod +x /etc/bluetooth/reconnect.sh
 
@@ -381,6 +433,22 @@ EOF
             fi
             ok "AutoEnable=true set in /etc/bluetooth/main.conf"
         fi
+
+        # Also record the MAC in Inkwriter's own config, not just the
+        # systemd reconnect plumbing above -- this is what lets the app
+        # itself show a "waiting for keyboard" screen at boot and block
+        # entering the UI until that specific keyboard is connected,
+        # rather than silently landing in an editor with no way to type.
+        if (cd "$INKWRITER_DIR" && python3 -c "
+from inkwriter.config import Config
+c = Config()
+c._cfg.set('bluetooth', 'keyboard_mac', '$BT_MAC')
+c.save()
+" 2>/dev/null); then
+            ok "Saved keyboard MAC to config.ini (enables the boot-time keyboard-wait screen)"
+        else
+            warn "Could not write keyboard_mac to config.ini -- set it manually later if needed"
+        fi
     else
         warn "No MAC provided -- skipping auto-reconnect setup"
         info "Re-run this script, or follow INSTALL.md Step 4e, once you've paired one"
@@ -398,12 +466,25 @@ if ask_yn "Enable USB gadget mode so Ctrl+T can type documents into another comp
     CONFIG_TXT="$BOOT_DIR/config.txt"
     CMDLINE_TXT="$BOOT_DIR/cmdline.txt"
 
-    if ! grep -q "^dtoverlay=dwc2" "$CONFIG_TXT" 2>/dev/null; then
-        echo "dtoverlay=dwc2" | sudo tee -a "$CONFIG_TXT" > /dev/null
-        ok "Added dtoverlay=dwc2 to $CONFIG_TXT"
+    # Explicit dr_mode=peripheral, not plain "dtoverlay=dwc2" -- without an
+    # ID pin wired (true of the Zero W's USB port), OTG auto-detect can
+    # land in host mode, which never creates a UDC at /sys/class/udc and
+    # silently means /dev/hidg0 (and type-out) can never work. Some stock
+    # Raspberry Pi OS images even ship an explicit
+    # "dtoverlay=dwc2,dr_mode=host" line by default (host mode, for a USB
+    # peripheral plugged into the Pi) -- if that's already there, it has
+    # to be flipped to peripheral, not just left alone, since gadget mode
+    # and host mode are mutually exclusive for the same controller.
+    if grep -q "^dtoverlay=dwc2,dr_mode=host" "$CONFIG_TXT" 2>/dev/null; then
+        sudo sed -i 's/^dtoverlay=dwc2,dr_mode=host/dtoverlay=dwc2,dr_mode=peripheral/' "$CONFIG_TXT"
+        ok "Found dtoverlay=dwc2 already set to host mode -- switched to peripheral mode in $CONFIG_TXT"
+        REBOOT_NEEDED=1
+    elif ! grep -q "^dtoverlay=dwc2,dr_mode=peripheral" "$CONFIG_TXT" 2>/dev/null; then
+        echo "dtoverlay=dwc2,dr_mode=peripheral" | sudo tee -a "$CONFIG_TXT" > /dev/null
+        ok "Added dtoverlay=dwc2,dr_mode=peripheral to $CONFIG_TXT"
         REBOOT_NEEDED=1
     else
-        ok "dtoverlay=dwc2 already present"
+        ok "dtoverlay=dwc2,dr_mode=peripheral already present"
     fi
 
     if [[ -f "$CMDLINE_TXT" ]] && ! grep -q "modules-load=dwc2,libcomposite" "$CMDLINE_TXT"; then
@@ -417,6 +498,11 @@ if ask_yn "Enable USB gadget mode so Ctrl+T can type documents into another comp
     sudo tee /usr/local/bin/inkwriter-hid-setup > /dev/null << 'EOF'
 #!/bin/bash
 set -e
+# Belt-and-suspenders: cmdline.txt's modules-load=dwc2,libcomposite
+# should load this at early boot already, but explicitly modprobing here
+# too is a harmless no-op if it's already loaded, and a real fix if that
+# early-boot load ever didn't happen for some reason.
+modprobe dwc2 2>/dev/null || true
 modprobe libcomposite
 cd /sys/kernel/config/usb_gadget
 mkdir -p inkwriter && cd inkwriter

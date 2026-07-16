@@ -204,9 +204,22 @@ Create `/etc/bluetooth/reconnect.sh`:
 ```bash
 sudo tee /etc/bluetooth/reconnect.sh << 'EOF'
 #!/bin/bash
-# Reconnect trusted Bluetooth devices on boot
+# Reconnect trusted Bluetooth devices on boot. Retries several times,
+# spaced out -- the adapter and/or keyboard often aren't fully ready in
+# the first several seconds after boot. Many BT keyboards also won't
+# accept an unsolicited connect while asleep; a keypress wakes them, and
+# with AutoEnable=true (see 4f below) they'll usually reconnect on their
+# own at that point without this script's help. Always exits 0 -- a
+# failed attempt here is routine (keyboard asleep/out of range), not a
+# real service failure.
 sleep 10   # wait for BT stack to fully start
-bluetoothctl -- connect AA:BB:CC:DD:EE:FF
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if bluetoothctl -- connect AA:BB:CC:DD:EE:FF; then
+        exit 0
+    fi
+    sleep 5
+done
+exit 0
 EOF
 sudo chmod +x /etc/bluetooth/reconnect.sh
 ```
@@ -244,6 +257,41 @@ sudo systemctl enable bt-reconnect
 | Connected but no input | Run `sudo chmod 660 /dev/input/event*` — then test with `evtest` |
 | Drops after a few minutes | Add `AutoEnable=true` to `/etc/bluetooth/main.conf` under `[Policy]` |
 | Reconnect script not working | Check `journalctl -u bt-reconnect` for errors |
+| `power on` fails / `NotReady` in bluetoothctl | The Zero W's Bluetooth is UART-attached, not USB -- check `sudo systemctl status hciuart`, `rfkill list` (unblock if soft-blocked), and that `pi-bluetooth` is installed. See `hciconfig -a` for whether `hci0` shows up at all. |
+
+### 4g. Boot-time "waiting for keyboard" screen
+
+If `install.sh` set up Bluetooth for you, it also wrote the paired
+keyboard's MAC into `~/.config/inkwriter/config.ini` under `[bluetooth]`:
+
+```ini
+[bluetooth]
+keyboard_mac = AA:BB:CC:DD:EE:FF
+require_keyboard_at_boot = true
+```
+
+With `keyboard_mac` set, Inkwriter checks (independently of
+`bt-reconnect.service` above) whether that keyboard is actually connected
+*before* starting the editor UI. If it isn't yet, the e-ink panel shows a
+"Waiting for keyboard..." screen and keeps polling every 5 seconds,
+indefinitely -- landing in an editor you have no way to type into is
+worse than a clear wait screen. Two ways out, both usable over SSH
+without touching the Pi itself:
+
+- **Connect the keyboard remotely**: `ssh` in and run
+  `bluetoothctl connect AA:BB:CC:DD:EE:FF` (or just bring the keyboard
+  back in range / wake it with a keypress) -- the next poll (within 5s)
+  picks it up and the UI starts.
+- **Turn the gate off**: `ssh` in, edit `config.ini`, and set
+  `require_keyboard_at_boot = false`. This is re-read live every poll
+  cycle, so it takes effect within 5 seconds -- no restart needed. Useful
+  if you're troubleshooting without the keyboard on hand, or plan to use
+  Inkwriter over SSH/type-out only for a session.
+
+Setting `keyboard_mac` to blank (or leaving it unset if you paired
+manually rather than through `install.sh`) skips this gate entirely --
+the UI starts immediately regardless of Bluetooth state, same as before
+this feature existed.
 
 ---
 
@@ -402,6 +450,7 @@ The final layout on the Pi should be:
       spleen-8x16.pil       # bundled bitmap font (display.font_name)
       spleen-8x16.pbm
     art/
+      logo.png               # boot-animation logo -- see Step 9c
       growth_1_seed.png     # shutdown-screen pixel art, one per growth
       growth_2_sprout.png   # stage -- see display.shutdown_screen in
       growth_3_plant.png    # Step 10. Shipped as static files, not
@@ -532,6 +581,14 @@ sudo systemctl restart inkwriter          # picks up whatever it found
   adopting it.
 - **Update log**: `~/.config/inkwriter/update.log` on the Pi records
   every check -- what it found, what it applied, and any rollback.
+- **Your own data**: documents, notes, `config.ini` (including your
+  Bluetooth keyboard MAC), progress stats, and custom art all live in
+  `~/.config/inkwriter` and `~/Documents/inkwriter` -- entirely outside
+  the git-managed `inkwriter/` checkout the updater resets, so a `git
+  reset --hard` during an update structurally cannot touch them. As
+  extra defense-in-depth, the updater also takes a timestamped backup of
+  `config.ini` and `progress.json` into `~/.config/inkwriter/backups/`
+  before every update, keeping the last 5.
 
 ---
 
@@ -608,6 +665,32 @@ that happens.
 
 ---
 
+## Step 9c — Boot animation
+
+At every boot (e-ink only -- a no-op on HDMI/terminal), Inkwriter reveals
+`inkwriter/art/logo.png` with a diagonal cascade of real partial
+refreshes -- a wave sweeping from the top-left corner to the bottom-right,
+built entirely from the panel's own native partial-refresh operation
+rather than any special animation hardware. Takes roughly 2-3 seconds,
+then holds briefly and does one clean full refresh before the file
+browser appears.
+
+To use your own logo: replace `inkwriter/art/logo.png` with any
+PNG/JPG -- it's letterboxed to fit the panel and dithered to 1-bit
+automatically, same as the shutdown-screen custom backgrounds. Turn it
+off entirely with:
+
+```ini
+[display]
+boot_animation = false
+```
+
+If `logo.png` is missing, this skips itself silently rather than
+erroring -- boot proceeds straight to the keyboard-wait gate (Step 4g) or
+file browser.
+
+---
+
 ## Step 10 — Configuration
 
 Auto-created on first run at `~/.config/inkwriter/config.ini`.
@@ -636,6 +719,10 @@ show_growth_features = true
 show_session_summary = true
 show_milestones = true
 streak_grace_days = 3
+
+[bluetooth]
+keyboard_mac =
+require_keyboard_at_boot = true
 ```
 
 `display.shutdown_screen` (in the `[display]` block above) picks what's

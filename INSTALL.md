@@ -680,11 +680,23 @@ animation hardware:
    so the handoff into the file browser is a deliberate wipe rather than
    an abrupt cut.
 
-Takes roughly 4-5 seconds total. Want to see it before it's on the
-actual hardware? `tools/preview_boot_animation.py` renders the exact
-same reveal/hold/wipe sequence to an animated GIF you can open on any
-computer -- run `python3 tools/preview_boot_animation.py` from the repo
-root (needs Pillow: `pip install pillow`).
+Deliberately built from only a handful of real hardware refreshes (a
+few reveal steps + a few wipe strips, ~12 total, not one per pixel
+block) -- each partial/full refresh costs real physical time on e-ink
+hardware regardless of how the software is written, so keeping that
+count low keeps this from meaningfully slowing down boot. An earlier
+version of this feature used ~85 hardware refreshes and added well
+over a minute to every boot; if boot ever feels slow again, this
+animation (and the `require_keyboard_at_boot` wait screen, which also
+does hardware refreshes) are the first things worth checking.
+
+Want to see it before it's on the actual hardware?
+`tools/preview_boot_animation.py` renders the same reveal/hold/wipe
+sequence to an animated GIF you can open on any computer -- run
+`python3 tools/preview_boot_animation.py` from the repo root (needs
+Pillow: `pip install pillow`). The GIF has extra in-between frames for
+smooth playback; the real device does far fewer actual refreshes than
+the frame count implies.
 
 To use your own logo: replace `inkwriter/art/logo.png` with any
 PNG/JPG -- it's letterboxed to fit the panel and dithered to 1-bit

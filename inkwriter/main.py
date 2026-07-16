@@ -169,7 +169,15 @@ def _wait_for_keyboard(display, config):
     attempt = 0
     while True:
         attempt += 1
-        display.show_bt_waiting_screen(mac, attempt)
+        # show_bt_waiting_screen() does a full e-ink refresh (1-3+
+        # seconds of real hardware time), so it's only redrawn on the
+        # first attempt and then every 3rd one (~15s) rather than every
+        # single 5s poll -- the status check itself (cheap, no hardware)
+        # still runs every 5s so the wait ends as soon as the keyboard
+        # actually connects, it just doesn't repaint the panel that
+        # often while it's still waiting.
+        if attempt == 1 or attempt % 3 == 0:
+            display.show_bt_waiting_screen(mac, attempt)
         time.sleep(5)
 
         if _bt_is_connected(mac):

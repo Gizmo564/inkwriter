@@ -5,10 +5,19 @@ no Pi or e-ink hardware required.
 
 This reimplements the same logic as Display.show_boot_animation() /
 Display._wipe_clear() in display.py: an iris-style reveal from the
-image's center outward, then a wipe-to-blank transition -- but instead
-of pushing each step to a physical panel via SPI, it saves each step as
-a frame and stitches them into an animated GIF you can open anywhere.
-Keep this in sync with display.py if you tune the real animation.
+image's center outward (growing filled circles), then a wipe-to-blank
+transition -- but instead of pushing each step to a physical panel via
+SPI, it saves each step as a frame and stitches them into an animated
+GIF you can open anywhere. Keep this in sync with display.py if you
+tune the real animation.
+
+Note on frame count vs. real hardware: this preview renders many extra
+in-between frames (`substeps` per ring) purely so the GIF plays back
+smoothly. The real device does none of that -- it only performs `steps`
++ `wipe_strips` + 2 actual panel refreshes total (see the timing note
+in show_boot_animation()'s docstring), since each one costs real
+physical time on the panel. Frame count here has no bearing on real
+boot time.
 
 Usage:
     python3 tools/preview_boot_animation.py [path/to/logo.png] [output.gif]
@@ -20,12 +29,12 @@ current directory.
 import sys
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 
 def render_preview(logo_path, out_path, width=792, height=272,
-                    cols=14, rows=5, reveal_ms=45, hold_ms=600,
-                    wipe_strips=12, wipe_ms=30, end_hold_ms=700):
+                    steps=6, substeps=6, frame_ms=25, hold_ms=600,
+                    wipe_strips=4, wipe_ms=60, end_hold_ms=700):
     logo_path = Path(logo_path)
     if not logo_path.exists():
         raise SystemExit(f"Logo not found: {logo_path}")
@@ -52,46 +61,35 @@ def render_preview(logo_path, out_path, width=792, height=272,
         draw_frames.append(canvas.convert("L").convert("RGB"))
         durations.append(ms)
 
-    snapshot(reveal_ms)
+    snapshot(frame_ms)
 
-    # --- Iris reveal: blocks ordered by distance from the logo's own
-    # center, so it opens outward like an aperture instead of sweeping
-    # flatly in one direction.
-    block_w = max(1, art_w // cols)
-    block_h = max(1, art_h // rows)
-    blocks = []
-    for r in range(rows):
-        for c in range(cols):
-            bx, by = c * block_w, r * block_h
-            bw = block_w if c < cols - 1 else art_w - bx
-            bh = block_h if r < rows - 1 else art_h - by
-            blocks.append((bx, by, bw, bh))
-
+    # --- Iris reveal: same growing-circle mask as show_boot_animation(),
+    # just sampled at steps*substeps points instead of `steps` for
+    # smoother GIF playback (cosmetic only, see module docstring).
     cx, cy = art_w / 2.0, art_h / 2.0
+    max_r = (cx ** 2 + cy ** 2) ** 0.5
+    blank = Image.new("1", (art_w, art_h), 255)
+    total = steps * substeps
 
-    def dist(b):
-        bx, by, bw, bh = b
-        return ((bx + bw / 2.0 - cx) ** 2 + (by + bh / 2.0 - cy) ** 2) ** 0.5
-
-    blocks.sort(key=dist)
-
-    for bx, by, bw, bh in blocks:
-        region = art.crop((bx, by, bx + bw, by + bh))
-        canvas.paste(region, (x0 + bx, y0 + by))
-        snapshot(reveal_ms)
+    for i in range(1, total + 1):
+        r = max_r * i / total
+        mask = Image.new("L", (art_w, art_h), 0)
+        ImageDraw.Draw(mask).ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+        frame = Image.composite(art, blank, mask)
+        canvas.paste(frame, (x0, y0))
+        snapshot(frame_ms)
 
     # Hold on the completed logo.
     snapshot(hold_ms)
 
-    # --- Wipe-clear: sweep the whole panel to blank in vertical strips.
+    # --- Wipe-clear: sweep the whole panel to blank in a few vertical
+    # strips, matching Display._wipe_clear()'s default strip count.
     strip_w = max(1, width // wipe_strips)
     for i in range(wipe_strips):
         x = i * strip_w
         sw = strip_w if i < wipe_strips - 1 else width - x
-        canvas_draw = canvas.copy()
-        from PIL import ImageDraw
-        ImageDraw.Draw(canvas_draw).rectangle([x, 0, x + sw, height], fill=255)
-        canvas = canvas_draw
+        canvas = canvas.copy()
+        ImageDraw.Draw(canvas).rectangle([x, 0, x + sw, height], fill=255)
         snapshot(wipe_ms)
 
     # A couple of held blank frames so it's clear the wipe finished

@@ -186,7 +186,7 @@ class Display:
 
         self._epd = driver_module.EPD()
         self._epd.init()
-        self._epd.Clear(0xFF)
+        self._epd_clear(0xFF)
 
         self._refresh_interval = self.config._cfg.getint(
             "display", "refresh_full_interval"
@@ -406,22 +406,32 @@ class Display:
 
         self._render_full_screen(draw)
 
-    def show_boot_animation(self, logo_path=None, cols=14, rows=5, delay=0.045,
-                             hold=0.6):
+    def show_boot_animation(self, logo_path=None, steps=6, delay=0.03, hold=0.4):
         """
-        One-time boot flourish, all built from the panel's own native
-        partial-refresh operation -- no special hardware needed, just a
-        sequence of small updates:
+        One-time boot flourish:
 
-          1. Iris reveal: the logo appears from the center outward, like
-             an aperture opening -- a nod to the logo itself being
-             concentric rings. Blocks are revealed in order of distance
-             from the image center rather than a flat left-right/
-             diagonal sweep.
+          1. Iris reveal: the logo appears from its own center outward,
+             like an aperture opening -- a nod to the logo itself being
+             concentric rings.
           2. Hold, then a full refresh to leave a crisp final image.
-          3. Wipe-clear: the whole panel sweeps to blank in vertical
-             strips, turning the handoff to the file browser into a
-             deliberate transition instead of an abrupt cut.
+          3. Wipe-clear: the panel sweeps to blank in a few strips, so
+             the handoff to the file browser is a deliberate transition
+             instead of an abrupt cut.
+
+        IMPORTANT: on real e-ink hardware, each partial/full refresh call
+        costs real physical time (the panel has to actually redistribute
+        ink particles) well beyond the `time.sleep(delay)` in this
+        function -- a partial refresh is commonly a few hundred ms, a
+        full refresh 1-3+ seconds, regardless of how small `delay` is
+        set. That physical cost is invisible in the software-only
+        preview tool (tools/preview_boot_animation.py just draws frames,
+        no hardware involved), which is why this deliberately uses very
+        few hardware operations (`steps` rings + a handful of wipe
+        strips, ~12 total) instead of a fine block grid -- an earlier
+        version used ~85 individual partial refreshes here and added
+        well over a minute to every boot. If boot still feels slow after
+        this, the fastest fix is `boot_animation = false` in config.ini;
+        see INSTALL.md's "Boot animation" section.
 
         Skips itself silently (not an error) if boot_animation is off in
         config or the logo file is missing -- this is a nice-to-have,
@@ -452,31 +462,26 @@ class Display:
         # of call order, so only the logo's own pixels ever need to flip.
         self._draw_ctx.rectangle([0, 0, w, h], fill=255)
 
-        block_w = max(1, art_w // cols)
-        block_h = max(1, art_h // rows)
-        blocks = []
-        for r in range(rows):
-            for c in range(cols):
-                bx, by = c * block_w, r * block_h
-                bw = block_w if c < cols - 1 else art_w - bx
-                bh = block_h if r < rows - 1 else art_h - by
-                blocks.append((bx, by, bw, bh))
+        # Iris/aperture reveal, built as growing filled circles rather
+        # than a block grid -- this keeps the *hardware* refresh count
+        # down to `steps` (a handful) while still visually expanding
+        # outward from the center: each step re-masks the same
+        # pre-rendered art with a larger circle and re-pushes the same
+        # region, instead of pushing one hardware refresh per grid cell.
+        from PIL import Image, ImageDraw
 
-        # Iris/aperture reveal -- order blocks by distance from the
-        # image's center so the wipe expands outward like a ring opening,
-        # rather than sweeping flatly across in one direction.
         cx, cy = art_w / 2.0, art_h / 2.0
+        max_r = (cx ** 2 + cy ** 2) ** 0.5
+        blank = Image.new("1", (art_w, art_h), 255)
+        region = (x0, y0, art_w, art_h)
 
-        def _dist(block):
-            bx, by, bw, bh = block
-            return ((bx + bw / 2.0 - cx) ** 2 + (by + bh / 2.0 - cy) ** 2) ** 0.5
-
-        blocks.sort(key=_dist)
-
-        for bx, by, bw, bh in blocks:
-            region = art.crop((bx, by, bx + bw, by + bh))
-            self._image.paste(region, (x0 + bx, y0 + by))
-            self._partial_refresh((x0 + bx, y0 + by, bw, bh))
+        for i in range(1, steps + 1):
+            r = max_r * i / steps
+            mask = Image.new("L", (art_w, art_h), 0)
+            ImageDraw.Draw(mask).ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+            frame = Image.composite(art, blank, mask)
+            self._image.paste(frame, (x0, y0))
+            self._partial_refresh(region)
             time.sleep(delay)
 
         # One clean full refresh at the end: resets the accumulated
@@ -488,14 +493,16 @@ class Display:
 
         self._wipe_clear()
 
-    def _wipe_clear(self, strips=12, delay=0.03):
+    def _wipe_clear(self, strips=4, delay=0.02):
         """
-        Sweep the entire panel to blank in vertical strips, left to
-        right, via real partial refreshes -- the transition out of the
-        boot animation and into the file browser, so the logo visibly
-        wipes away instead of just cutting to the next screen. Ends with
-        a full refresh so the browser's very first draw starts from a
-        clean, ghost-free panel.
+        Sweep the entire panel to blank in a few vertical strips via real
+        partial refreshes -- the transition out of the boot animation and
+        into the file browser, so the logo visibly wipes away instead of
+        just cutting to the next screen. Kept to a small strip count for
+        the same reason show_boot_animation() uses few reveal steps: each
+        strip is a real hardware refresh, not a free software animation
+        frame. Ends with a full refresh so the browser's very first draw
+        starts from a clean, ghost-free panel.
         """
         w, h = self.config.display_width, self.config.display_height
         strip_w = max(1, w // strips)
@@ -557,8 +564,8 @@ class Display:
 
         try:
             self._epd.init()
-            self._epd.Clear(0x00)   # full black
-            self._epd.Clear(0xFF)   # full white -- clears residual charge
+            self._epd_clear(0x00)   # full black
+            self._epd_clear(0xFF)   # full white -- clears residual charge
         except Exception as exc:
             log.warning(f"Shutdown flash cycle skipped: {exc}")
 
@@ -824,6 +831,24 @@ class Display:
     # ------------------------------------------------------------------
     # Internal e-ink refresh helpers
     # ------------------------------------------------------------------
+
+    def _epd_clear(self, color):
+        """
+        Call the driver's Clear(), tolerating both signatures that exist
+        across different Waveshare panel drivers / pip package versions:
+        some accept a color byte (Clear(0xFF)), others take none at all
+        (Clear()) and only ever clear to white. Discovered the hard way
+        -- epd5in79's Clear() on the version `pip install waveshare-epaper`
+        pulls down takes no argument, so a hardcoded Clear(0xFF) call
+        raised a TypeError on the very first e-ink init, which made the
+        whole app silently degrade to terminal mode with a completely
+        blank panel and no visible error (see _init_eink()'s except
+        clause) -- easy to mistake for a wiring/hardware problem.
+        """
+        try:
+            self._epd.Clear(color)
+        except TypeError:
+            self._epd.Clear()
 
     def _full_refresh(self):
         if self._epd is None or self._image is None:

@@ -230,7 +230,12 @@ BRANCH="$REPO_BRANCH"
 DATA_DIR="\$HOME/.config/inkwriter"
 LOG_FILE="\$DATA_DIR/update.log"
 BACKUP_DIR="\$DATA_DIR/update_backups"
-NETWORK_TIMEOUT=6
+# Kept short deliberately -- this runs Before=inkwriter.service, so it's
+# on the critical boot path every time. Two checks (reachability +
+# fetch) each bounded by this, so worst case is ~2x this value added to
+# boot when a real update is found; typically far less (either no
+# network yet -> fails fast, or already up to date -> one quick check).
+NETWORK_TIMEOUT=4
 
 mkdir -p "\$DATA_DIR"
 log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG_FILE"; }
@@ -595,7 +600,17 @@ Description=Inkwriter writing device
 # inkwriter-update.service only exists if automatic updates were enabled
 # above -- systemd treats a reference to a unit that isn't installed as
 # already-satisfied, so this line is harmless either way.
-After=multi-user.target bt-reconnect.service inkwriter-update.service
+#
+# Deliberately NOT ordered After=bt-reconnect.service: that service
+# retries the OS-level Bluetooth connection up to 10 times, 5s apart
+# (worst case ~60s), and Type=oneshot means anything After= it would
+# block until it finishes. Inkwriter has its own keyboard-wait screen
+# (_wait_for_keyboard in main.py) that polls connection status and
+# shows a clear "waiting" screen if needed, so it doesn't need to wait
+# for bt-reconnect.service to finish first -- Wants= still starts them
+# together, they just run in parallel instead of serially, which was
+# previously adding up to a minute of blank-screen delay to every boot.
+After=multi-user.target inkwriter-update.service
 Wants=bt-reconnect.service
 
 [Service]

@@ -390,7 +390,7 @@ ls /dev/hidg0
 sudo apt update && sudo apt install -y \
     python3-pip \
     python3-pil python3-numpy \
-    git libgpiod2 python3-lgpio \
+    git libgpiod3 python3-lgpio \
     fonts-dejavu-core
 ```
 

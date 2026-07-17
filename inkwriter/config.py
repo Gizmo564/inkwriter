@@ -112,6 +112,27 @@ class Config:
                 # SSH lets a boot proceed without the keyboard.
                 "require_keyboard_at_boot": "true",
             },
+            "safe_mode": {
+                # Emergency kill switch: when true, main() skips almost
+                # everything -- FileManager, NoteManager, Display, Progress,
+                # curses -- and just idles, logging a warning. Built while
+                # troubleshooting a hardware fault (SKU 26843 e-Paper panel
+                # appearing to brown out the whole Pi on init) where the
+                # normal GitHub auto-update was the only reliable way to
+                # change what ran at boot, since SSH windows were too short
+                # and unpredictable to trust. Also best-effort disables
+                # bt-reconnect/inkwriter-hid-setup via `sudo -n` -- only
+                # actually works if a broader sudoers rule has been granted
+                # (see OPS_TODO.md); fails harmlessly otherwise.
+                #
+                # Default here is "true" because this config ships as a
+                # deliberately conservative bring-up build for a fresh SD
+                # card -- flip to "false" (no git push needed, just edit
+                # this file directly and it's re-read on restart) once
+                # you've confirmed the Pi is stable and you're ready to
+                # actually test Inkwriter itself again.
+                "enabled": "true",
+            },
         }
 
         self._cfg = configparser.ConfigParser()
@@ -245,6 +266,10 @@ class Config:
     @property
     def require_keyboard_at_boot(self):
         return self._cfg.getboolean("bluetooth", "require_keyboard_at_boot", fallback=True)
+
+    @property
+    def safe_mode(self):
+        return self._cfg.getboolean("safe_mode", "enabled", fallback=False)
 
     def key(self, name):
         """Return integer keycode for a named binding."""

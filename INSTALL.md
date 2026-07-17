@@ -746,7 +746,20 @@ streak_grace_days = 3
 [bluetooth]
 keyboard_mac =
 require_keyboard_at_boot = true
+
+[safe_mode]
+enabled = false
 ```
+
+**`[safe_mode] enabled`** -- emergency kill switch. When `true`, Inkwriter
+skips almost everything at startup (file manager, notes, display, curses)
+and just idles, logging a warning -- useful if a hardware fault is making
+the normal app unstable and you want the Pi itself to stay reachable
+while you sort it out. Re-read fresh on restart, so flipping it over SSH
+takes effect with just `sudo systemctl restart inkwriter`, no reinstall.
+See `OPS_TODO.md` for the fuller story and `inkwriter-rescue.service`
+(below) for a more severe version of the same idea that doesn't need SSH
+access at all.
 
 `display.shutdown_screen` (in the `[display]` block above) picks what's
 shown before power-off: `growth` (pixel-art growth stage + word count,

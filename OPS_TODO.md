@@ -46,6 +46,17 @@ least-privilege question since the updater already runs unattended at
 every boot. Marker-file + separate rescue service keeps the update
 mechanism itself dumb and low-risk.
 
-**Status:** not started. Revisit once the current SKU 26843 hardware
-issue is resolved and there's room to build/test this properly rather
-than firefighting.
+**Status:** built. `install.sh` now writes `/usr/local/bin/inkwriter-rescue`
+(static, root-run via `inkwriter-rescue.service`, ordered before
+bt-reconnect/inkwriter-hid-setup/inkwriter) and reacts to a plain
+`RESCUE_MODE` marker file's presence in the repo -- delivered by a normal
+`git push`, no SSH or sudoers change needed at the moment it's used. Also
+added a config-driven `[safe_mode] enabled` setting (`config.py`
+`Config.safe_mode`) so the softer "idle instead of running normally"
+behavior can be toggled without a git push once SSH is reliable again.
+
+Not yet tested against a real hardware fault in the wild (built during
+the SKU 26843 firefight but the fix landed via the config-driven route
+before this needed exercising) -- worth confirming the actual RESCUE_MODE
+marker-file flow end-to-end next time it's relevant, rather than assuming
+it works untested.

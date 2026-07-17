@@ -346,6 +346,89 @@ fi
 AUTO_UPDATE_ENABLED="${AUTO_UPDATE_ENABLED:-0}"
 
 # ----------------------------------------------------------------------------
+# 4c. Rescue service -- always installed, not prompted
+# ----------------------------------------------------------------------------
+#
+# A narrowly-scoped, always-on emergency lever: if a hardware fault ever
+# makes normal troubleshooting (SSH sessions, config.ini edits) unreliable
+# because the Pi keeps rebooting or dropping off the network, this gives
+# you a way to disable extra services that's deliverable via a completely
+# normal `git push`, no live SSH session or sudoers change required at
+# the time you need it (see OPS_TODO.md for the story behind this).
+#
+# Design: the actual executable script lives in /usr/local/bin, written
+# once here and never touched by a git pull (same reasoning as
+# inkwriter-update -- code that reset --hard could affect shouldn't be
+# what's doing the resetting). It runs as root via systemd (no User=),
+# and only reacts to the *presence* of a plain marker file inside the
+# git-managed directory ($INKWRITER_DIR/RESCUE_MODE) -- never its
+# contents, and the list of services it touches is fixed in this script,
+# not read from repo-controlled data. That keeps "a git-delivered file's
+# mere existence can trigger root actions" from also meaning "arbitrary
+# pulled code can run as root": only this fixed, install-time-written
+# script ever actually executes with root privilege.
+#
+# To use it: from your own machine, `touch RESCUE_MODE && git add RESCUE_MODE
+# && git commit -m "rescue mode on" && git push`. The next boot's
+# inkwriter-update.service pulls it down, and this service (ordered
+# before bt-reconnect/inkwriter-hid-setup/inkwriter even start) disables
+# all three. Remove the file and push again to return to normal.
+
+step "Inkwriter rescue service"
+sudo tee /usr/local/bin/inkwriter-rescue > /dev/null << EOF
+#!/bin/bash
+# Inkwriter rescue mode (written by install.sh, never modified by a git
+# pull -- see OPS_TODO.md in the project repo). Runs as root, ordered
+# before bt-reconnect/inkwriter-hid-setup/inkwriter even start. If
+# \$INKWRITER_DIR/RESCUE_MODE exists -- a plain marker file delivered by
+# the normal GitHub auto-update, just like any other tracked file --
+# stops and disables a fixed list of services so as little as possible
+# runs while troubleshooting a hardware fault, deliverable via a normal
+# git push with no SSH session required.
+
+INKWRITER_DIR="$INKWRITER_DIR"
+LOG_FILE="/var/log/inkwriter-rescue.log"
+SERVICES="bt-reconnect inkwriter-hid-setup inkwriter"
+
+log() { echo "\$(date '+%Y-%m-%d %H:%M:%S') \$*" >> "\$LOG_FILE"; }
+
+if [[ -f "\$INKWRITER_DIR/RESCUE_MODE" ]]; then
+    log "RESCUE_MODE marker present -- disabling: \$SERVICES"
+    for svc in \$SERVICES; do
+        if systemctl disable --now "\$svc" >>"\$LOG_FILE" 2>&1; then
+            log "disabled \$svc"
+        else
+            log "could not disable \$svc (may not be installed)"
+        fi
+    done
+else
+    log "OK: no RESCUE_MODE marker present, nothing to do"
+fi
+EOF
+sudo chmod +x /usr/local/bin/inkwriter-rescue
+ok "Wrote /usr/local/bin/inkwriter-rescue"
+
+sudo tee /etc/systemd/system/inkwriter-rescue.service > /dev/null << 'EOF'
+[Unit]
+Description=Inkwriter rescue mode -- disable extra services if RESCUE_MODE marker is present
+# References to units that aren't installed (e.g. bt-reconnect.service if
+# you skip Bluetooth setup) are harmless -- systemd treats them as
+# already-satisfied, same as elsewhere in this script.
+After=inkwriter-update.service local-fs.target
+Before=bt-reconnect.service inkwriter-hid-setup.service inkwriter.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/inkwriter-rescue
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable inkwriter-rescue >/dev/null 2>&1
+ok "inkwriter-rescue.service enabled -- runs as root, checks for a RESCUE_MODE marker file every boot"
+
+# ----------------------------------------------------------------------------
 # 5. Bluetooth keyboard
 # ----------------------------------------------------------------------------
 

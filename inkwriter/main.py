@@ -49,8 +49,78 @@ def disable_flow_control():
         pass
 
 
+EINK_SAFE_MODE = True
+
+# Non-essential systemd units to try to disable in safe mode -- best
+# effort only (see _safe_mode_disable_extra_services docstring for why
+# this can't be guaranteed without a one-time sudoers change).
+_SAFE_MODE_EXTRA_SERVICES = ["bt-reconnect", "inkwriter-hid-setup"]
+
+
+def _safe_mode_disable_extra_services():
+    """
+    Attempt to stop+disable services unrelated to the core reboot-loop
+    investigation (Bluetooth reconnect, USB HID gadget setup), so as
+    little as possible touches hardware while EINK_SAFE_MODE is on.
+
+    This can only ever be best-effort: the inkwriter user's sudo access
+    is scoped to exactly one command (`systemctl poweroff`, set up by
+    install.sh's sudoers rule) precisely so a compromised/buggy app
+    can't do much damage. Disabling arbitrary services needs broader
+    sudo access, which a git-delivered code update cannot grant itself
+    -- that requires a one-time manual edit to /etc/sudoers.d/ over
+    SSH. `sudo -n` (non-interactive) makes this fail instantly and
+    harmlessly if that permission isn't present, rather than hanging
+    waiting on a password prompt that can never come from inside a
+    systemd service.
+    """
+    import subprocess
+    for name in _SAFE_MODE_EXTRA_SERVICES:
+        try:
+            result = subprocess.run(
+                ["sudo", "-n", "systemctl", "disable", "--now", name],
+                capture_output=True, text=True, timeout=10,
+            )
+            if result.returncode == 0:
+                log.warning(f"EINK_SAFE_MODE: disabled {name}.service")
+            else:
+                log.warning(
+                    f"EINK_SAFE_MODE: could not disable {name}.service "
+                    f"(needs a sudoers rule beyond poweroff -- see main.py): "
+                    f"{result.stderr.strip()}"
+                )
+        except Exception as exc:
+            log.warning(f"EINK_SAFE_MODE: error disabling {name}.service: {exc}")
+
+
 def main():
     config = Config()
+
+    # --- TEMPORARY EINK SAFE MODE ----------------------------------------
+    # Flip EINK_SAFE_MODE to False (or delete this block) once the panel
+    # hardware issue is resolved. A local, untouched-by-updates copy of
+    # the pre-safe-mode source lives in backups/ (gitignored) if this
+    # block needs to be reverted by hand instead.
+    #
+    # Context: the physical e-ink panel appears to be causing the whole
+    # Pi to brown out / reboot when Inkwriter tries to initialize it
+    # (SKU 26843 on a Universal e-Paper Raw Panel Driver HAT, Rev2.3 --
+    # see the Waveshare support ticket). This keeps the Pi stable and
+    # reachable over SSH/the GitHub auto-updater while that's sorted
+    # out. Deliberately skips constructing almost everything below --
+    # FileManager, NoteManager, Display, Progress, curses -- not just
+    # the display, on the theory that less code running at all is less
+    # risk while actively debugging a hardware fault, even though only
+    # the display code is actually suspected.
+    if EINK_SAFE_MODE:
+        log.warning(
+            "EINK_SAFE_MODE is on (see main.py) -- Inkwriter is not "
+            "starting normally. No GPIO/SPI/display code will run."
+        )
+        _safe_mode_disable_extra_services()
+        while True:
+            time.sleep(3600)
+
     file_manager = FileManager(config)
     note_manager = NoteManager(config)
     display = Display(config)   # auto-detects eink vs terminal

@@ -13,3 +13,8 @@ inkwriter/art/custom/*
 .DS_Store
 *.swp
 *.bak
+
+# Local snapshots of known-good versions, kept outside git entirely so a
+# `git reset --hard` (by the auto-updater or anyone else) can never touch
+# them. Not meant to be shared/pushed -- just a local safety net.
+backups/
